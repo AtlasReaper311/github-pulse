@@ -1,0 +1,15 @@
+{
+  "name": "github-pulse",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Read-only GitHub stats proxy for atlas-systems.uk. Token stays server-side, responses cache in KV.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "tail": "wrangler tail"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

@@ -1,0 +1,33 @@
+# github-pulse // Cloudflare Worker configuration
+
+name = "github-pulse"
+main = "src/index.js"
+compatibility_date = "2025-09-01"
+
+workers_dev = false
+
+routes = [
+  { pattern = "api.atlas-systems.uk/pulse*", zone_name = "atlas-systems.uk" }
+]
+
+[observability]
+enabled = true
+
+# Plain config lives here; only credentials go through wrangler secret.
+[vars]
+GITHUB_USER = "AtlasReaper311"
+ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,http://localhost:8788"
+CACHE_TTL_SECONDS = "3600"
+# Optional: uncomment to report upstream failures into atlas-notify
+# (also requires the NOTIFY_TOKEN secret below).
+# NOTIFY_URL = "https://api.atlas-systems.uk/notify"
+
+# Create the namespace first, then paste its id below:
+#   npx wrangler kv namespace create PULSE_CACHE
+[[kv_namespaces]]
+binding = "PULSE_CACHE"
+id = "REPLACE_WITH_NAMESPACE_ID"
+
+# Secrets (set with: npx wrangler secret put <NAME>):
+#   GITHUB_TOKEN     required; fine-grained PAT, public repo read access
+#   NOTIFY_TOKEN     optional; shared token for atlas-notify (pairs with NOTIFY_URL above)

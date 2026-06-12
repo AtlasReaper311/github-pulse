@@ -1,0 +1,9 @@
+# Copy to .dev.vars for local `wrangler dev`. Never commit .dev.vars.
+# In production these are Worker secrets, set with `wrangler secret put`.
+
+# Fine-grained PAT, "Public repositories (read-only)", no extra permissions.
+GITHUB_TOKEN="github_pat_REPLACE_ME"
+
+# Optional. Pairs with NOTIFY_URL in wrangler.toml to report upstream
+# failures into atlas-notify. Leave empty to disable.
+NOTIFY_TOKEN=""
