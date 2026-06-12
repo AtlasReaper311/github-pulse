@@ -20,7 +20,7 @@ ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,http://
 CACHE_TTL_SECONDS = "3600"
 # Optional: uncomment to report upstream failures into atlas-notify
 # (also requires the NOTIFY_TOKEN secret below).
-# NOTIFY_URL = "https://api.atlas-systems.uk/notify"
+NOTIFY_URL = "https://api.atlas-systems.uk/notify"
 
 # Create the namespace first, then paste its id below:
 #   npx wrangler kv namespace create PULSE_CACHE
