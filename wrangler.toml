@@ -26,7 +26,7 @@ CACHE_TTL_SECONDS = "3600"
 #   npx wrangler kv namespace create PULSE_CACHE
 [[kv_namespaces]]
 binding = "PULSE_CACHE"
-id = "REPLACE_WITH_NAMESPACE_ID"
+id = "5664a9475b92499c8ee22a7e820a76fd"
 
 # Secrets (set with: npx wrangler secret put <NAME>):
 #   GITHUB_TOKEN     required; fine-grained PAT, public repo read access
