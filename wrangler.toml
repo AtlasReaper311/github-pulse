@@ -7,7 +7,7 @@ compatibility_date = "2025-09-01"
 workers_dev = false
 
 routes = [
-  { pattern = "api.atlas-systems.uk/github-pulse*", zone_id = "8ba6350a78c988447c111048b125f917" }
+  { pattern = "api.atlas-systems.uk/pulse*", zone_id = "8ba6350a78c988447c111048b125f917" }
 ]
 
 [observability]
