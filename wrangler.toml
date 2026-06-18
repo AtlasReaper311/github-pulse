@@ -16,7 +16,7 @@ enabled = true
 # Plain config lives here; only credentials go through wrangler secret.
 [vars]
 GITHUB_USER = "AtlasReaper311"
-ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,http://localhost:8788"
+ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,https://status.atlas-systems.uk,http://localhost:8788"
 CACHE_TTL_SECONDS = "3600"
 # Optional: uncomment to report upstream failures into atlas-notify
 # (also requires the NOTIFY_TOKEN secret below).
