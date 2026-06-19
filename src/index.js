@@ -39,17 +39,18 @@ export default {
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: cors });
     }
-    if (request.method !== "GET") {
-      return json(405, { error: "GET only" }, { ...cors, Allow: "GET" });
-    }
     if (request.method === "POST" && url.pathname.endsWith("/pulse/purge")) {
       const auth = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
     if (!env.PULSE_PURGE_TOKEN || auth !== env.PULSE_PURGE_TOKEN) {
       return json(401, { error: "unauthorized" }, cors);
     }
-  await env.PULSE_CACHE.delete("pulse:v1:all");
-  return json(200, { ok: true, purged: true }, cors);
-}
+    await env.PULSE_CACHE.delete("pulse:v1:all");
+      return json(200, { ok: true, purged: true }, cors);
+    }
+    if (request.method !== "GET") {
+      return json(405, { error: "GET only" }, { ...cors, Allow: "GET" });
+    }
+    
     if (!env.GITHUB_TOKEN) {
       // Without a token the API allows 60 requests/hour per IP, which a
       // single page load of aggregate mode can exhaust. Refusing to run
