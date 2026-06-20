@@ -318,4 +318,3 @@ function json(status, body, headers = {}) {
     headers: { "content-type": "application/json", ...headers },
   });
 }
-const x = 1
