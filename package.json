@@ -8,6 +8,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail"
+    "lint": "eslint ."
   },
   "devDependencies": {
     "wrangler": "^4.0.0"
