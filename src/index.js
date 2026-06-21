@@ -9,8 +9,10 @@
  *   3. The site keeps rendering stats during a GitHub outage, serving
  *      the last cached snapshot.
  *
- * GET /pulse            aggregate stats across the account
- * GET /pulse?repo=name  one repository in detail
+ * GET /pulse                aggregate stats across the account
+ * GET /pulse?repo=name      one repository in detail
+ * GET /pulse/heatmap        per-day commit counts for the last 90 days
+ *                           (drives the Lab activity heatmap)
  */
 
 const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
@@ -21,6 +23,16 @@ const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 // the worst case at 39, comfortable headroom under the limit.
 const LANGUAGE_REPO_LIMIT = 30;
 const RECENT_COMMIT_REPO_LIMIT = 5;
+
+// Heatmap mode uses search/commits pagination instead of per-repo loops.
+// 100 commits per page × HEATMAP_MAX_PAGES = ceiling on how far back we
+// can reliably colour. 10 pages = up to 1000 commits in the window,
+// which comfortably covers 90 days for any normal account while
+// spending at most 10 subrequests on the search itself (+1 repos call
+// for totals/topLanguage). Increase if you regularly push >1000
+// commits in 90 days.
+const HEATMAP_MAX_PAGES = 10;
+const HEATMAP_PER_PAGE = 100;
 
 const GITHUB_API = "https://api.github.com";
 
@@ -41,16 +53,21 @@ export default {
     }
     if (request.method === "POST" && url.pathname.endsWith("/pulse/purge")) {
       const auth = (request.headers.get("authorization") || "").replace(/^Bearer\s+/i, "");
-    if (!env.PULSE_PURGE_TOKEN || auth !== env.PULSE_PURGE_TOKEN) {
-      return json(401, { error: "unauthorized" }, cors);
-    }
-    await env.PULSE_CACHE.delete("pulse:v1:all");
+      if (!env.PULSE_PURGE_TOKEN || auth !== env.PULSE_PURGE_TOKEN) {
+        return json(401, { error: "unauthorized" }, cors);
+      }
+      // Purge both the aggregate cache and the heatmap cache so a manual
+      // purge is a single button, not two.
+      await Promise.all([
+        env.PULSE_CACHE.delete("pulse:v1:all"),
+        env.PULSE_CACHE.delete("pulse:v1:heatmap"),
+      ]);
       return json(200, { ok: true, purged: true }, cors);
     }
     if (request.method !== "GET") {
       return json(405, { error: "GET only" }, { ...cors, Allow: "GET" });
     }
-    
+
     if (!env.GITHUB_TOKEN) {
       // Without a token the API allows 60 requests/hour per IP, which a
       // single page load of aggregate mode can exhaust. Refusing to run
@@ -58,14 +75,22 @@ export default {
       return json(500, { error: "GITHUB_TOKEN secret is not set" }, cors);
     }
 
+    const user = env.GITHUB_USER || "AtlasReaper311";
+    const isHeatmap = url.pathname.endsWith("/pulse/heatmap");
     const repoParam = url.searchParams.get("repo");
-    if (repoParam && !REPO_NAME_PATTERN.test(repoParam)) {
+
+    if (!isHeatmap && repoParam && !REPO_NAME_PATTERN.test(repoParam)) {
       return json(400, { error: "invalid repo name" }, cors);
     }
 
-    const user = env.GITHUB_USER || "AtlasReaper311";
-    const cacheKey = `pulse:v1:${repoParam || "all"}`;
-    const ttl = Number(env.CACHE_TTL_SECONDS || 3600);
+    // Heatmap data is heavier per build but stable enough to cache a
+    // bit longer than the live aggregate. Tunable per-env if needed.
+    const cacheKey = isHeatmap
+      ? "pulse:v1:heatmap"
+      : `pulse:v1:${repoParam || "all"}`;
+    const ttl = isHeatmap
+      ? Number(env.HEATMAP_TTL_SECONDS || 1800)
+      : Number(env.CACHE_TTL_SECONDS || 3600);
 
     // Serve from KV when possible. The x-pulse-cache header makes cache
     // behaviour observable from curl, which turns "is the cache working"
@@ -84,7 +109,9 @@ export default {
     }
 
     try {
-      const data = repoParam
+      const data = isHeatmap
+        ? await heatmapStats(env, user)
+        : repoParam
         ? await repoStats(env, user, repoParam)
         : await aggregateStats(env, user);
 
@@ -239,6 +266,99 @@ async function repoStats(env, user, repoName) {
       author: c.commit?.author?.name || "unknown",
       date: c.commit?.author?.date || null,
     })),
+  };
+}
+
+/**
+ * Per-day commit counts for the last 90 days, plus the totals the Lab
+ * heatmap header needs in one payload.
+ *
+ * Strategy: paginate /search/commits with author + author-date >=
+ * cutoff, bucket each commit's author.date into its YYYY-MM-DD. This
+ * is dramatically cheaper than iterating /repos/.../commits per repo,
+ * and uses the same data source as the 90-day total on the aggregate
+ * endpoint — so the heatmap's per-day sum will match the headline
+ * number exactly.
+ *
+ * Caveat (worth knowing, not worth fixing here): search/commits indexes
+ * default-branch commits only, same as the aggregate count. Work that
+ * only ever lived on a feature branch won't appear until merged. This
+ * matches the existing /pulse contract — better to be consistent than
+ * to silently disagree with the headline number.
+ */
+async function heatmapStats(env, user) {
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
+    .toISOString()
+    .slice(0, 10);
+
+  // Repos call is reused for publicRepos + topLanguage. Done in
+  // parallel with the first search page to keep cold-path latency low.
+  const firstPagePromise = gh(
+    env,
+    `/search/commits?q=author:${user}+author-date:>=${ninetyDaysAgo}&per_page=${HEATMAP_PER_PAGE}&page=1`,
+  );
+  const reposPromise = gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
+
+  const [firstPage, repos] = await Promise.all([firstPagePromise, reposPromise]);
+  const ownRepos = repos.filter((r) => !r.fork);
+
+  const days = {};
+  const bucket = (items) => {
+    for (const item of items || []) {
+      const iso = item.commit?.author?.date;
+      if (!iso) continue;
+      const key = iso.slice(0, 10); // YYYY-MM-DD
+      days[key] = (days[key] || 0) + 1;
+    }
+  };
+
+  bucket(firstPage.items);
+
+  const totalCount = firstPage.total_count || 0;
+  const totalPages = Math.min(
+    HEATMAP_MAX_PAGES,
+    Math.ceil(totalCount / HEATMAP_PER_PAGE),
+  );
+
+  // Pages 2..N in parallel. Search API caps at 1000 results regardless,
+  // so HEATMAP_MAX_PAGES=10 is the natural ceiling anyway.
+  if (totalPages > 1) {
+    const rest = await Promise.all(
+      Array.from({ length: totalPages - 1 }, (_, i) =>
+        gh(
+          env,
+          `/search/commits?q=author:${user}+author-date:>=${ninetyDaysAgo}&per_page=${HEATMAP_PER_PAGE}&page=${i + 2}`,
+        ),
+      ),
+    );
+    for (const page of rest) bucket(page.items);
+  }
+
+  // Top language across owned repos. Uses the single `language` field
+  // on each repo (already in the repos payload) rather than the more
+  // accurate per-repo /languages endpoint — that would cost N extra
+  // subrequests for a header label, which isn't worth it.
+  const langCounts = {};
+  for (const r of ownRepos) {
+    if (!r.language) continue;
+    langCounts[r.language] = (langCounts[r.language] || 0) + 1;
+  }
+  const topLanguage =
+    Object.entries(langCounts).sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+
+  return {
+    generatedAt: new Date().toISOString(),
+    user,
+    rangeDays: 90,
+    totals: {
+      publicRepos: ownRepos.length,
+      commitsLast90Days: totalCount,
+      topLanguage,
+    },
+    days,
+    // Truncated flag lets the frontend show a small note if we hit the
+    // pagination ceiling and the real total exceeds what we bucketed.
+    truncated: totalCount > HEATMAP_MAX_PAGES * HEATMAP_PER_PAGE,
   };
 }
 
