@@ -15,6 +15,8 @@
  *                           (drives the Lab activity heatmap)
  */
 
+import { handleMeta } from "./_meta.js";
+
 const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
 // The free plan allows 50 subrequests per invocation. Aggregate mode
@@ -36,6 +38,20 @@ const HEATMAP_PER_PAGE = 100;
 
 const GITHUB_API = "https://api.github.com";
 
+const META = {
+  name: "github-pulse",
+  description: "Read-only GitHub activity feed for atlas-systems.uk, cached at the edge",
+  version: "1.0.0",
+  endpoints: [
+    { method: "GET", path: "/pulse", description: "Aggregate public GitHub stats across the account" },
+    { method: "GET", path: "/pulse?repo=<name>", description: "Detailed stats for one repository" },
+    { method: "GET", path: "/pulse/heatmap", description: "Per-day commit counts for the last 90 days" },
+    { method: "POST", path: "/pulse/purge", description: "Purge cached pulse snapshots; Bearer PULSE_PURGE_TOKEN required" },
+    { method: "GET", path: "/pulse/_meta", description: "This document" },
+  ],
+  source: "https://github.com/AtlasReaper311/github-pulse",
+};
+
 class GitHubError extends Error {
   constructor(status, message) {
     super(message);
@@ -46,6 +62,9 @@ class GitHubError extends Error {
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    const meta = handleMeta(url, META);
+    if (meta) return meta;
+
     const cors = corsHeaders(request, env);
 
     if (request.method === "OPTIONS") {
