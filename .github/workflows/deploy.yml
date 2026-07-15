@@ -5,6 +5,10 @@ on:
     branches: [main, dev]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.repository }}-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   deploy:
     uses: AtlasReaper311/atlas-infra/.github/workflows/deploy-worker.yml@main
