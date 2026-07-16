@@ -8,7 +8,8 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "tail": "wrangler tail",
-    "lint": "eslint ."
+    "lint": "eslint .",
+    "test": "node --test test/*.test.js"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

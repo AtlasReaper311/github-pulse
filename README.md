@@ -16,7 +16,7 @@
 ![Cache](https://img.shields.io/badge/cache-workers%20kv-4ade80?style=flat-square&labelColor=0a0a0f)
 ![Cost](https://img.shields.io/badge/cost-%C2%A30-aaa9a0?style=flat-square&labelColor=0a0a0f)
 
-Read-only proxy between atlas-systems.uk and the GitHub API. The site fetches one clean JSON document; the Worker handles authentication, aggregation, and caching.
+Read-only proxy between atlas-systems.uk and the GitHub API. The site fetches clean, bounded JSON documents; the Worker handles authentication, aggregation, workflow evidence, and caching.
 
 ```
 browser ──▶ api.atlas-systems.uk/pulse ──▶ KV cache (1 h)
@@ -69,6 +69,10 @@ npx wrangler dev                 # http://localhost:8787/pulse
 |---|---|
 | `GET /pulse` | Aggregate stats across the account |
 | `GET /pulse?repo=<name>` | One repository in detail |
+| `GET /pulse/heatmap` | Per-day commit counts for the last 90 days |
+| `GET /pulse/workflows` | Freshness-aware health for the three allowlisted non-runtime Atlas tools |
+
+`/pulse/workflows` is deliberately not a generic Actions proxy. It exposes only `atlas-badges`, `atlas-dep-audit`, and `atlas-journey-watch`, with no logs, actors, or arbitrary repository input. `atlas-badges` is healthy only when CI succeeded for the current `main` commit. The weekly dependency audit and six-hour journey watch are healthy only while their latest scheduled run is successful and fresh; running or overdue reads as `degraded`, a completed failure reads as `down`, and unavailable evidence reads as `unknown`.
 
 Aggregate response shape:
 
