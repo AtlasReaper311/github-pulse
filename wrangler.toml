@@ -18,6 +18,7 @@ enabled = true
 GITHUB_USER = "AtlasReaper311"
 ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,https://status.atlas-systems.uk,http://localhost:8788"
 CACHE_TTL_SECONDS = "3600"
+WORKFLOW_TTL_SECONDS = "300"
 # Optional: uncomment to report upstream failures into atlas-notify
 # (also requires the NOTIFY_TOKEN secret below).
 NOTIFY_URL = "https://api.atlas-systems.uk/notify"

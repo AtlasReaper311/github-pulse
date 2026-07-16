@@ -13,6 +13,7 @@
  * GET /pulse?repo=name      one repository in detail
  * GET /pulse/heatmap        per-day commit counts for the last 90 days
  *                           (drives the Lab activity heatmap)
+ * GET /pulse/workflows      bounded health evidence for three Atlas tools
  */
 
 import { handleMeta } from "./_meta.js";
@@ -38,14 +39,45 @@ const HEATMAP_PER_PAGE = 100;
 
 const GITHUB_API = "https://api.github.com";
 
+export const WORKFLOW_TARGETS = Object.freeze([
+  Object.freeze({
+    id: "atlas-badges",
+    repo: "atlas-badges",
+    workflow: "ci.yml",
+    branch: "main",
+    event: "push",
+    mode: "head",
+    maxAgeSeconds: null,
+  }),
+  Object.freeze({
+    id: "atlas-dep-audit",
+    repo: "atlas-dep-audit",
+    workflow: "audit.yml",
+    branch: "main",
+    event: "schedule",
+    mode: "scheduled",
+    maxAgeSeconds: 8 * 24 * 60 * 60,
+  }),
+  Object.freeze({
+    id: "atlas-journey-watch",
+    repo: "atlas-journey-watch",
+    workflow: "journey-watch.yml",
+    branch: "main",
+    event: "schedule",
+    mode: "scheduled",
+    maxAgeSeconds: 8 * 60 * 60,
+  }),
+]);
+
 const META = {
   name: "github-pulse",
   description: "Read-only GitHub activity feed for atlas-systems.uk, cached at the edge",
-  version: "1.0.0",
+  version: "1.1.0",
   endpoints: [
     { method: "GET", path: "/pulse", description: "Aggregate public GitHub stats across the account" },
     { method: "GET", path: "/pulse?repo=<name>", description: "Detailed stats for one repository" },
     { method: "GET", path: "/pulse/heatmap", description: "Per-day commit counts for the last 90 days" },
+    { method: "GET", path: "/pulse/workflows", description: "Freshness-aware health for allowlisted Atlas tools and scheduled workflows" },
     { method: "POST", path: "/pulse/purge", description: "Purge cached pulse snapshots; Bearer PULSE_PURGE_TOKEN required" },
     { method: "GET", path: "/pulse/_meta", description: "This document" },
   ],
@@ -80,6 +112,7 @@ export default {
       await Promise.all([
         env.PULSE_CACHE.delete("pulse:v1:all"),
         env.PULSE_CACHE.delete("pulse:v1:heatmap"),
+        env.PULSE_CACHE.delete("pulse:v1:workflow-health"),
       ]);
       return json(200, { ok: true, purged: true }, cors);
     }
@@ -96,9 +129,10 @@ export default {
 
     const user = env.GITHUB_USER || "AtlasReaper311";
     const isHeatmap = url.pathname.endsWith("/pulse/heatmap");
+    const isWorkflowHealth = url.pathname.endsWith("/pulse/workflows");
     const repoParam = url.searchParams.get("repo");
 
-    if (!isHeatmap && repoParam && !REPO_NAME_PATTERN.test(repoParam)) {
+    if (!isHeatmap && !isWorkflowHealth && repoParam && !REPO_NAME_PATTERN.test(repoParam)) {
       return json(400, { error: "invalid repo name" }, cors);
     }
 
@@ -106,10 +140,15 @@ export default {
     // bit longer than the live aggregate. Tunable per-env if needed.
     const cacheKey = isHeatmap
       ? "pulse:v1:heatmap"
-      : `pulse:v1:${repoParam || "all"}`;
+      : isWorkflowHealth
+        ? "pulse:v1:workflow-health"
+        : `pulse:v1:${repoParam || "all"}`;
     const ttl = isHeatmap
       ? Number(env.HEATMAP_TTL_SECONDS || 1800)
-      : Number(env.CACHE_TTL_SECONDS || 3600);
+      : isWorkflowHealth
+        ? Number(env.WORKFLOW_TTL_SECONDS || 300)
+        : Number(env.CACHE_TTL_SECONDS || 3600);
+    const browserTtl = isWorkflowHealth ? 60 : 300;
 
     // Serve from KV when possible. The x-pulse-cache header makes cache
     // behaviour observable from curl, which turns "is the cache working"
@@ -122,7 +161,7 @@ export default {
           ...cors,
           "content-type": "application/json",
           "x-pulse-cache": "HIT",
-          "Cache-Control": "public, max-age=300",
+          "Cache-Control": `public, max-age=${browserTtl}`,
         },
       });
     }
@@ -130,9 +169,11 @@ export default {
     try {
       const data = isHeatmap
         ? await heatmapStats(env, user)
-        : repoParam
-        ? await repoStats(env, user, repoParam)
-        : await aggregateStats(env, user);
+        : isWorkflowHealth
+          ? await workflowHealth(env, user)
+          : repoParam
+            ? await repoStats(env, user, repoParam)
+            : await aggregateStats(env, user);
 
       const body = JSON.stringify(data);
       ctx.waitUntil(env.PULSE_CACHE.put(cacheKey, body, { expirationTtl: ttl }));
@@ -143,7 +184,7 @@ export default {
           ...cors,
           "content-type": "application/json",
           "x-pulse-cache": "MISS",
-          "Cache-Control": "public, max-age=300",
+          "Cache-Control": `public, max-age=${browserTtl}`,
         },
       });
     } catch (err) {
@@ -182,6 +223,120 @@ async function gh(env, path) {
     throw new GitHubError(response.status, `GitHub ${path} returned ${response.status}: ${detail.slice(0, 200)}`);
   }
   return response.json();
+}
+
+function workflowEvidenceSource(user, target) {
+  return `github-actions:${user}/${target.repo}/workflows/${target.workflow}`;
+}
+
+function unknownWorkflow(target, user, detail) {
+  return {
+    status: "unknown",
+    evidence_source: workflowEvidenceSource(user, target),
+    measured_at: null,
+    detail,
+    run_url: null,
+    run_id: null,
+    freshness_seconds: null,
+    max_age_seconds: target.maxAgeSeconds,
+    head_sha_matches: target.mode === "head" ? null : undefined,
+  };
+}
+
+/**
+ * Convert one GitHub Actions run into the estate's four-state health
+ * vocabulary. Head-mode CI proves the current default-branch commit;
+ * scheduled mode proves both conclusion and expected freshness.
+ */
+export function classifyWorkflowRun(
+  target,
+  run,
+  { user = "AtlasReaper311", headSha = null, nowMs = Date.now() } = {},
+) {
+  if (!run) return unknownWorkflow(target, user, "no workflow run published");
+
+  const measuredAt = run.updated_at ?? run.run_started_at ?? run.created_at ?? null;
+  const measuredAtMs = Date.parse(measuredAt ?? "");
+  const freshnessSeconds = Number.isFinite(measuredAtMs)
+    ? Math.max(0, Math.round((nowMs - measuredAtMs) / 1000))
+    : null;
+  const headShaMatches = target.mode === "head"
+    ? Boolean(headSha && run.head_sha === headSha)
+    : undefined;
+  const base = {
+    evidence_source: workflowEvidenceSource(user, target),
+    measured_at: measuredAt,
+    run_url: run.html_url ?? null,
+    run_id: Number.isFinite(run.id) ? run.id : null,
+    freshness_seconds: freshnessSeconds,
+    max_age_seconds: target.maxAgeSeconds,
+    head_sha_matches: headShaMatches,
+  };
+
+  if (target.mode === "head" && !headSha) {
+    return { ...base, status: "unknown", detail: "default-branch head unavailable" };
+  }
+  if (target.mode === "head" && !headShaMatches) {
+    return { ...base, status: "degraded", detail: "current main commit awaits CI evidence" };
+  }
+  if (run.status !== "completed") {
+    return { ...base, status: "degraded", detail: `workflow ${run.status || "pending"}` };
+  }
+  if (run.conclusion !== "success") {
+    return {
+      ...base,
+      status: ["neutral", "skipped"].includes(run.conclusion) ? "degraded" : "down",
+      detail: `workflow concluded ${run.conclusion || "without a verdict"}`,
+    };
+  }
+  if (
+    target.mode === "scheduled"
+    && (!Number.isFinite(freshnessSeconds)
+      || freshnessSeconds > target.maxAgeSeconds)
+  ) {
+    return { ...base, status: "degraded", detail: "successful run is overdue" };
+  }
+  return { ...base, status: "healthy", detail: "latest expected run succeeded" };
+}
+
+async function readWorkflowTarget(env, user, target, nowMs) {
+  const query = new URLSearchParams({
+    branch: target.branch,
+    event: target.event,
+    per_page: "1",
+  });
+  try {
+    const runsPromise = gh(
+      env,
+      `/repos/${user}/${target.repo}/actions/workflows/${target.workflow}/runs?${query}`,
+    );
+    const headPromise = target.mode === "head"
+      ? gh(env, `/repos/${user}/${target.repo}/commits/${target.branch}`)
+      : Promise.resolve(null);
+    const [runs, head] = await Promise.all([runsPromise, headPromise]);
+    return classifyWorkflowRun(target, runs?.workflow_runs?.[0] ?? null, {
+      user,
+      headSha: head?.sha ?? null,
+      nowMs,
+    });
+  } catch {
+    return unknownWorkflow(target, user, "workflow evidence unavailable");
+  }
+}
+
+export async function workflowHealth(env, user, nowMs = Date.now()) {
+  const entries = await Promise.all(
+    WORKFLOW_TARGETS.map(async (target) => [
+      target.id,
+      await readWorkflowTarget(env, user, target, nowMs),
+    ]),
+  );
+  const workflows = Object.fromEntries(entries);
+  return {
+    ok: Object.values(workflows).some((item) => item.status !== "unknown"),
+    generated_at: new Date(nowMs).toISOString(),
+    workflows,
+  };
 }
 
 /** Aggregate stats across the whole account. */

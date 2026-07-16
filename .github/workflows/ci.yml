@@ -31,4 +31,5 @@ jobs:
       - name: Run offline validation
         run: |
           npm run lint
+          npm test
           npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-dry-run"
