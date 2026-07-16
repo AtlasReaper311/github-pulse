@@ -17,25 +17,20 @@
  */
 
 import { handleMeta } from "./_meta.js";
+import { getCommitCountSince, getCommitHeatmapSince } from "./lib/commitHistory.js";
 
 const REPO_NAME_PATTERN = /^[A-Za-z0-9_.-]{1,100}$/;
 
 // The free plan allows 50 subrequests per invocation. Aggregate mode
-// spends: 1 repos + 1 search + N languages + M recent-commits + 2 KV.
-// Capping language lookups at 30 and recent-commit lookups at 5 keeps
-// the worst case at 39, comfortable headroom under the limit.
+// spends: 1 repos + up to 2 batched GraphQL history calls (20 repos per
+// batch) + N languages + M recent-commits + 2 KV. Capping language lookups
+// at 30 and recent-commit lookups at 5 keeps the worst case comfortably
+// under the limit even with two GraphQL batches.
 const LANGUAGE_REPO_LIMIT = 30;
 const RECENT_COMMIT_REPO_LIMIT = 5;
 
-// Heatmap mode uses search/commits pagination instead of per-repo loops.
-// 100 commits per page × HEATMAP_MAX_PAGES = ceiling on how far back we
-// can reliably colour. 10 pages = up to 1000 commits in the window,
-// which comfortably covers 90 days for any normal account while
-// spending at most 10 subrequests on the search itself (+1 repos call
-// for totals/topLanguage). Increase if you regularly push >1000
-// commits in 90 days.
-const HEATMAP_MAX_PAGES = 10;
-const HEATMAP_PER_PAGE = 100;
+// Heatmap mode batches the same GraphQL history query used by aggregate
+// mode instead of paginating REST search. See lib/commitHistory.js.
 
 const GITHUB_API = "https://api.github.com";
 
@@ -72,7 +67,7 @@ export const WORKFLOW_TARGETS = Object.freeze([
 const META = {
   name: "github-pulse",
   description: "Read-only GitHub activity feed for atlas-systems.uk, cached at the edge",
-  version: "1.1.0",
+  version: "1.2.0",
   endpoints: [
     { method: "GET", path: "/pulse", description: "Aggregate public GitHub stats across the account" },
     { method: "GET", path: "/pulse?repo=<name>", description: "Detailed stats for one repository" },
@@ -206,23 +201,45 @@ export default {
 /* GitHub API access                                                   */
 /* ------------------------------------------------------------------ */
 
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+const GH_MAX_RETRIES = 2;
+const GH_RETRY_BASE_MS = 300;
+
 /** Authenticated GitHub request returning parsed JSON or GitHubError. */
 async function gh(env, path) {
-  const response = await fetch(`${GITHUB_API}${path}`, {
-    headers: {
-      Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      // GitHub rejects requests without a User-Agent outright.
-      "User-Agent": "github-pulse (atlas-systems.uk)",
-    },
-  });
+  let lastError;
 
-  if (!response.ok) {
+  for (let attempt = 0; attempt <= GH_MAX_RETRIES; attempt++) {
+    if (attempt > 0) {
+      await new Promise((resolve) => setTimeout(resolve, GH_RETRY_BASE_MS * 2 ** (attempt - 1)));
+    }
+
+    const response = await fetch(`${GITHUB_API}${path}`, {
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        // GitHub rejects requests without a User-Agent outright.
+        "User-Agent": "github-pulse (atlas-systems.uk)",
+      },
+    });
+
+    if (response.ok) {
+      return response.json();
+    }
+
     const detail = await response.text();
-    throw new GitHubError(response.status, `GitHub ${path} returned ${response.status}: ${detail.slice(0, 200)}`);
+    lastError = new GitHubError(response.status, `GitHub ${path} returned ${response.status}: ${detail.slice(0, 200)}`);
+
+    // 502/503/504 from GitHub's edge are usually transient; this is the
+    // same failure class that used to hit /search/commits as an HTML
+    // error page. Anything else is a real error, worth failing fast on.
+    if (!RETRYABLE_STATUSES.has(response.status) || attempt === GH_MAX_RETRIES) {
+      throw lastError;
+    }
   }
-  return response.json();
+
+  throw lastError;
 }
 
 function workflowEvidenceSource(user, target) {
@@ -341,27 +358,39 @@ export async function workflowHealth(env, user, nowMs = Date.now()) {
 
 /** Aggregate stats across the whole account. */
 async function aggregateStats(env, user) {
-  // The two top-level calls are independent; running them in parallel
-  // keeps cold-path latency near the slowest call instead of the sum.
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
 
-  const [repos, commitSearch] = await Promise.all([
-    gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`),
-    gh(env, `/search/commits?q=author:${user}+author-date:>=${ninetyDaysAgo}&per_page=1`),
-  ]);
+  const repos = await gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
 
   // Forks out: the pulse reports what this account builds, not what it
   // has clicked "fork" on.
   const ownRepos = repos.filter((r) => !r.fork);
 
-  // Language bytes per repo, aggregated. Capped to stay inside the free
-  // plan's subrequest budget; repos are pre-sorted by pushed date, so
-  // the cap drops only the longest-dormant ones.
-  const languageMaps = await Promise.all(
-    ownRepos.slice(0, LANGUAGE_REPO_LIMIT).map((r) => gh(env, `/repos/${user}/${r.name}/languages`)),
-  );
+  // These three are independent once ownRepos is known, so they run in
+  // parallel. Commit counting used to run in parallel with the repos call
+  // itself via /search/commits; that endpoint is what threw intermittent
+  // 503s, so it now goes through GraphQL history() instead (see
+  // lib/commitHistory.js), which necessarily needs the repo list first
+  // since GraphQL has no "search all my repos" equivalent to fall back on.
+  const [languageMaps, commitTotal, recentCommitLists] = await Promise.all([
+    Promise.all(ownRepos.slice(0, LANGUAGE_REPO_LIMIT).map((r) => gh(env, `/repos/${user}/${r.name}/languages`))),
+    getCommitCountSince(env, user, ownRepos.map((r) => r.name), ninetyDaysAgo),
+    Promise.all(
+      ownRepos.slice(0, RECENT_COMMIT_REPO_LIMIT).map(async (r) => {
+        const commits = await gh(env, `/repos/${user}/${r.name}/commits?per_page=5`);
+        return commits.map((c) => ({
+          repo: r.name,
+          message: firstLine(c.commit?.message),
+          sha: (c.sha || "").slice(0, 7),
+          author: c.commit?.author?.name || "unknown",
+          date: c.commit?.author?.date || null,
+        }));
+      }),
+    ),
+  ]);
+
   const byteTotals = {};
   for (const langMap of languageMaps) {
     for (const [lang, bytes] of Object.entries(langMap)) {
@@ -374,27 +403,6 @@ async function aggregateStats(env, user) {
     .filter((l) => l.percent >= 0.5)
     .sort((a, b) => b.percent - a.percent);
 
-  // Recent commits: ground truth from each repo's real Commits API,
-  // not the public events feed. GitHub's events feed marks a push's
-  // commits "non-distinct" (and omits them entirely) when it judges
-  // them already visible from an earlier push to the same branch,
-  // which a day of small successive web-UI commits trips constantly,
-  // silently producing an empty "no recent activity" read. Since repos
-  // are already sorted by pushed date above, only the handful most
-  // likely to actually contain the most recent commits are queried
-  // directly here, keeping this well inside the subrequest budget.
-  const recentCommitLists = await Promise.all(
-    ownRepos.slice(0, RECENT_COMMIT_REPO_LIMIT).map(async (r) => {
-      const commits = await gh(env, `/repos/${user}/${r.name}/commits?per_page=5`);
-      return commits.map((c) => ({
-        repo: r.name,
-        message: firstLine(c.commit?.message),
-        sha: (c.sha || "").slice(0, 7),
-        author: c.commit?.author?.name || "unknown",
-        date: c.commit?.author?.date || null,
-      }));
-    }),
-  );
   const recentCommits = recentCommitLists
     .flat()
     .filter((c) => c.date)
@@ -407,9 +415,10 @@ async function aggregateStats(env, user) {
     totals: {
       publicRepos: ownRepos.length,
       stars: ownRepos.reduce((sum, r) => sum + r.stargazers_count, 0),
-      // Search counts default-branch commits only; feature-branch work
+      // GraphQL history() counts default-branch commits only, same
+      // trade-off the old search-based count had; feature-branch work
       // appears once merged. Documented trade-off (see README).
-      commitsLast90Days: commitSearch.total_count,
+      commitsLast90Days: commitTotal,
     },
     languages,
     repos: ownRepos.map(repoCard),
@@ -447,70 +456,36 @@ async function repoStats(env, user, repoName) {
  * Per-day commit counts for the last 90 days, plus the totals the Lab
  * heatmap header needs in one payload.
  *
- * Strategy: paginate /search/commits with author + author-date >=
- * cutoff, bucket each commit's author.date into its YYYY-MM-DD. This
- * is dramatically cheaper than iterating /repos/.../commits per repo,
- * and uses the same data source as the 90-day total on the aggregate
- * endpoint — so the heatmap's per-day sum will match the headline
+ * Strategy: batched GraphQL history() queries per repo (see
+ * lib/commitHistory.js), bucketing each commit's committedDate into its
+ * YYYY-MM-DD. Uses the same GraphQL calls as the 90-day total on the
+ * aggregate endpoint, so the heatmap's per-day sum matches the headline
  * number exactly.
  *
- * Caveat (worth knowing, not worth fixing here): search/commits indexes
+ * Caveat (worth knowing, not worth fixing here): history() indexes
  * default-branch commits only, same as the aggregate count. Work that
  * only ever lived on a feature branch won't appear until merged. This
- * matches the existing /pulse contract — better to be consistent than
- * to silently disagree with the headline number.
+ * matches the existing /pulse contract; better to be consistent than to
+ * silently disagree with the headline number.
  */
 async function heatmapStats(env, user) {
   const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
     .toISOString()
     .slice(0, 10);
 
-  // Repos call is reused for publicRepos + topLanguage. Done in
-  // parallel with the first search page to keep cold-path latency low.
-  const firstPagePromise = gh(
-    env,
-    `/search/commits?q=author:${user}+author-date:>=${ninetyDaysAgo}&per_page=${HEATMAP_PER_PAGE}&page=1`,
-  );
-  const reposPromise = gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
-
-  const [firstPage, repos] = await Promise.all([firstPagePromise, reposPromise]);
+  const repos = await gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
   const ownRepos = repos.filter((r) => !r.fork);
 
-  const days = {};
-  const bucket = (items) => {
-    for (const item of items || []) {
-      const iso = item.commit?.author?.date;
-      if (!iso) continue;
-      const key = iso.slice(0, 10); // YYYY-MM-DD
-      days[key] = (days[key] || 0) + 1;
-    }
-  };
-
-  bucket(firstPage.items);
-
-  const totalCount = firstPage.total_count || 0;
-  const totalPages = Math.min(
-    HEATMAP_MAX_PAGES,
-    Math.ceil(totalCount / HEATMAP_PER_PAGE),
+  const { total, days, truncatedRepos } = await getCommitHeatmapSince(
+    env,
+    user,
+    ownRepos.map((r) => r.name),
+    ninetyDaysAgo,
   );
-
-  // Pages 2..N in parallel. Search API caps at 1000 results regardless,
-  // so HEATMAP_MAX_PAGES=10 is the natural ceiling anyway.
-  if (totalPages > 1) {
-    const rest = await Promise.all(
-      Array.from({ length: totalPages - 1 }, (_, i) =>
-        gh(
-          env,
-          `/search/commits?q=author:${user}+author-date:>=${ninetyDaysAgo}&per_page=${HEATMAP_PER_PAGE}&page=${i + 2}`,
-        ),
-      ),
-    );
-    for (const page of rest) bucket(page.items);
-  }
 
   // Top language across owned repos. Uses the single `language` field
   // on each repo (already in the repos payload) rather than the more
-  // accurate per-repo /languages endpoint — that would cost N extra
+  // accurate per-repo /languages endpoint. That would cost N extra
   // subrequests for a header label, which isn't worth it.
   const langCounts = {};
   for (const r of ownRepos) {
@@ -526,13 +501,15 @@ async function heatmapStats(env, user) {
     rangeDays: 90,
     totals: {
       publicRepos: ownRepos.length,
-      commitsLast90Days: totalCount,
+      commitsLast90Days: total,
       topLanguage,
     },
     days,
-    // Truncated flag lets the frontend show a small note if we hit the
-    // pagination ceiling and the real total exceeds what we bucketed.
-    truncated: totalCount > HEATMAP_MAX_PAGES * HEATMAP_PER_PAGE,
+    // True if any single repo's 90-day window held more than 100 commits
+    // on the default branch (GraphQL's per-query connection cap). For a
+    // solo estate this is expected to stay false in practice.
+    truncated: truncatedRepos.length > 0,
+    truncatedRepos,
   };
 }
 
