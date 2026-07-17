@@ -358,9 +358,7 @@ export async function workflowHealth(env, user, nowMs = Date.now()) {
 
 /** Aggregate stats across the whole account. */
 async function aggregateStats(env, user) {
-  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const repos = await gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
 
@@ -469,9 +467,7 @@ async function repoStats(env, user, repoName) {
  * silently disagree with the headline number.
  */
 async function heatmapStats(env, user) {
-  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000)
-    .toISOString()
-    .slice(0, 10);
+  const ninetyDaysAgo = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
 
   const repos = await gh(env, `/users/${user}/repos?per_page=100&type=owner&sort=pushed`);
   const ownRepos = repos.filter((r) => !r.fork);
