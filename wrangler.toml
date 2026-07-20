@@ -1,7 +1,7 @@
 # github-pulse // Cloudflare Worker configuration
 
 name = "github-pulse"
-main = "src/index.js"
+main = "src/public-boundary.js"
 compatibility_date = "2025-09-01"
 
 workers_dev = false
@@ -19,16 +19,13 @@ GITHUB_USER = "AtlasReaper311"
 ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,https://status.atlas-systems.uk,http://localhost:8788"
 CACHE_TTL_SECONDS = "3600"
 WORKFLOW_TTL_SECONDS = "300"
-# Optional: uncomment to report upstream failures into atlas-notify
-# (also requires the NOTIFY_TOKEN secret below).
 NOTIFY_URL = "https://api.atlas-systems.uk/notify"
 
-# Create the namespace first, then paste its id below:
-#   npx wrangler kv namespace create PULSE_CACHE
 [[kv_namespaces]]
 binding = "PULSE_CACHE"
 id = "5664a9475b92499c8ee22a7e820a76fd"
 
-# Secrets (set with: npx wrangler secret put <NAME>):
-#   GITHUB_TOKEN     required; fine-grained PAT, public repo read access
-#   NOTIFY_TOKEN     optional; shared token for atlas-notify (pairs with NOTIFY_URL above)
+# Secrets (set with interactive prompts only):
+#   GITHUB_TOKEN     required; repository read access. Private repository access
+#                    contributes only to anonymous aggregate commit counts.
+#   NOTIFY_TOKEN     optional; shared token for atlas-notify.
