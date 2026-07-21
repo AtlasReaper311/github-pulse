@@ -3,7 +3,7 @@
 </div>
 
 # github-pulse
- 
+  
 ```
 ┌─────────────────────────────────────────────┐
 │  ATLAS SYSTEMS // github-pulse              │
@@ -14,6 +14,7 @@
 
 ![Cloudflare Worker](https://img.shields.io/badge/cloudflare-worker-f5a623?style=flat-square&labelColor=0a0a0f)
 ![Cache](https://img.shields.io/badge/cache-workers%20kv-4ade80?style=flat-square&labelColor=0a0a0f)
+![Upstream](https://img.shields.io/badge/upstream-GitHub%20API-aaa9a0?style=flat-square&labelColor=0a0a0f)
 ![Cost](https://img.shields.io/badge/cost-%C2%A30-aaa9a0?style=flat-square&labelColor=0a0a0f)
 
 Read-only proxy between atlas-systems.uk and the GitHub API. The site fetches clean, bounded JSON documents; the Worker handles authentication, aggregation, workflow evidence, and caching.
