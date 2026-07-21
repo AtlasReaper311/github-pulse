@@ -33,3 +33,17 @@ jobs:
           npm run lint
           npm test
           npx wrangler deploy --dry-run --outdir "$RUNNER_TEMP/wrangler-dry-run"
+
+      - name: Check out pinned Atlas Infra Worker contract validator
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          repository: AtlasReaper311/atlas-infra
+          ref: f971172dc258c93dffa53b8b7a3532c5be55883d
+          path: .atlas-infra-contracts
+          persist-credentials: false
+
+      - name: Validate bundled Worker metadata contract
+        run: |
+          python3 .atlas-infra-contracts/scripts/worker_contract.py check \
+            --bundle-dir "$RUNNER_TEMP/wrangler-dry-run" \
+            --require-meta

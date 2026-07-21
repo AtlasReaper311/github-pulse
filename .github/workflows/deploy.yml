@@ -14,8 +14,9 @@ concurrency:
 
 jobs:
   deploy:
-    uses: AtlasReaper311/atlas-infra/.github/workflows/deploy-worker.yml@093df3f87fa4e068155455f82c9b69bffad76fb6 # atlas-infra main
+    uses: AtlasReaper311/atlas-infra/.github/workflows/deploy-worker.yml@f971172dc258c93dffa53b8b7a3532c5be55883d # atlas-infra W3 Worker contract enforcement
     with:
       worker_name: github-pulse
       run_lint: true
+      require_meta: true
     secrets: inherit
