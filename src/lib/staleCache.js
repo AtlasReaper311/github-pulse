@@ -29,7 +29,7 @@ function encode(body, storedAtMs) {
   try {
     generatedAt = JSON.parse(body)?.generatedAt || null;
   } catch {
-    generatedAt = null;
+    // Bodies without valid JSON have no generated timestamp.
   }
 
   return JSON.stringify({
