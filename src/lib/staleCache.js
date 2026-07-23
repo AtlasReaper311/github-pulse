@@ -14,6 +14,7 @@ function decode(raw) {
         body: parsed.body,
         storedAtMs: parsed.storedAtMs,
         generatedAt: parsed.generatedAt || null,
+        legacy: false,
       };
     }
   } catch {
@@ -21,7 +22,12 @@ function decode(raw) {
     // snapshots and refresh them in the background instead of discarding them.
   }
 
-  return { body: raw, storedAtMs: 0, generatedAt: null };
+  return {
+    body: raw,
+    storedAtMs: 0,
+    generatedAt: null,
+    legacy: true,
+  };
 }
 
 function encode(body, storedAtMs) {
@@ -62,7 +68,7 @@ export async function cachedJson({
   const cached = decode(raw);
   const freshForMs = freshTtlSeconds * 1000;
 
-  if (cached && now() - cached.storedAtMs < freshForMs) {
+  if (cached && !cached.legacy && now() - cached.storedAtMs < freshForMs) {
     return {
       body: cached.body,
       cache: "HIT",
