@@ -1,7 +1,7 @@
 # github-pulse // Cloudflare Worker configuration
 
 name = "github-pulse"
-main = "src/public-boundary.js"
+main = "src/stale-public-boundary.js"
 compatibility_date = "2025-09-01"
 
 workers_dev = false
@@ -18,6 +18,7 @@ enabled = true
 GITHUB_USER = "AtlasReaper311"
 ALLOWED_ORIGINS = "https://atlas-systems.uk,https://www.atlas-systems.uk,https://status.atlas-systems.uk,http://localhost:8788"
 CACHE_TTL_SECONDS = "3600"
+CACHE_RETENTION_TTL_SECONDS = "86400"
 WORKFLOW_TTL_SECONDS = "300"
 NOTIFY_URL = "https://api.atlas-systems.uk/notify"
 
