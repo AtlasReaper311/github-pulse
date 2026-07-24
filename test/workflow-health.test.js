@@ -13,6 +13,7 @@ function run(overrides = {}) {
     id: 42,
     status: "completed",
     conclusion: "success",
+    event: "schedule",
     head_sha: "abc123",
     updated_at: "2026-07-16T11:00:00.000Z",
     html_url: "https://github.com/AtlasReaper311/example/actions/runs/42",
@@ -69,6 +70,58 @@ test("scheduled workflow health distinguishes overdue, running, and failed", () 
     { nowMs: NOW },
   );
   assert.equal(failed.status, "down");
+});
+
+test("a newer manual remediation run supersedes an older scheduled failure", async () => {
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (input) => {
+    const url = new URL(String(input));
+    const event = url.searchParams.get("event");
+    if (event === "workflow_dispatch") {
+      return Response.json({
+        workflow_runs: [
+          run({
+            id: 43,
+            event,
+            updated_at: new Date(Date.now() - 60 * 60 * 1000).toISOString(),
+          }),
+        ],
+      });
+    }
+    return Response.json({
+      workflow_runs: [
+        run({
+          event,
+          conclusion: "failure",
+          updated_at: new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString(),
+        }),
+      ],
+    });
+  };
+
+  try {
+    const env = {
+      GITHUB_TOKEN: "test-token",
+      PULSE_CACHE: {
+        async get() {
+          return null;
+        },
+        async put() {},
+        async delete() {},
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://api.atlas-systems.uk/pulse/workflows"),
+      env,
+      { waitUntil() {} },
+    );
+    const body = await response.json();
+    assert.equal(body.workflows["atlas-dep-audit"].status, "healthy");
+    assert.equal(body.workflows["atlas-dep-audit"].run_event, "workflow_dispatch");
+    assert.equal(body.workflows["atlas-dep-audit"].run_id, 43);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
 });
 
 test("missing workflow evidence fails closed to unknown", () => {

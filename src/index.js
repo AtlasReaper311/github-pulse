@@ -40,7 +40,7 @@ export const WORKFLOW_TARGETS = Object.freeze([
     repo: "atlas-badges",
     workflow: "ci.yml",
     branch: "main",
-    event: "push",
+    events: Object.freeze(["push"]),
     mode: "head",
     maxAgeSeconds: null,
   }),
@@ -49,7 +49,7 @@ export const WORKFLOW_TARGETS = Object.freeze([
     repo: "atlas-dep-audit",
     workflow: "audit.yml",
     branch: "main",
-    event: "schedule",
+    events: Object.freeze(["schedule", "workflow_dispatch"]),
     mode: "scheduled",
     maxAgeSeconds: 8 * 24 * 60 * 60,
   }),
@@ -58,7 +58,7 @@ export const WORKFLOW_TARGETS = Object.freeze([
     repo: "atlas-journey-watch",
     workflow: "journey-watch.yml",
     branch: "main",
-    event: "schedule",
+    events: Object.freeze(["schedule", "workflow_dispatch"]),
     mode: "scheduled",
     maxAgeSeconds: 8 * 60 * 60,
   }),
@@ -254,6 +254,7 @@ function unknownWorkflow(target, user, detail) {
     detail,
     run_url: null,
     run_id: null,
+    run_event: null,
     freshness_seconds: null,
     max_age_seconds: target.maxAgeSeconds,
     head_sha_matches: target.mode === "head" ? null : undefined,
@@ -285,6 +286,7 @@ export function classifyWorkflowRun(
     measured_at: measuredAt,
     run_url: run.html_url ?? null,
     run_id: Number.isFinite(run.id) ? run.id : null,
+    run_event: run.event ?? null,
     freshness_seconds: freshnessSeconds,
     max_age_seconds: target.maxAgeSeconds,
     head_sha_matches: headShaMatches,
@@ -313,25 +315,36 @@ export function classifyWorkflowRun(
   ) {
     return { ...base, status: "degraded", detail: "successful run is overdue" };
   }
-  return { ...base, status: "healthy", detail: "latest expected run succeeded" };
+  return { ...base, status: "healthy", detail: "latest accepted run succeeded" };
+}
+
+function workflowRunTime(run) {
+  return Date.parse(run?.updated_at ?? run?.run_started_at ?? run?.created_at ?? "") || 0;
 }
 
 async function readWorkflowTarget(env, user, target, nowMs) {
-  const query = new URLSearchParams({
-    branch: target.branch,
-    event: target.event,
-    per_page: "1",
-  });
   try {
-    const runsPromise = gh(
-      env,
-      `/repos/${user}/${target.repo}/actions/workflows/${target.workflow}/runs?${query}`,
+    const runsPromise = Promise.all(
+      target.events.map((event) => {
+        const query = new URLSearchParams({
+          branch: target.branch,
+          event,
+          per_page: "1",
+        });
+        return gh(
+          env,
+          `/repos/${user}/${target.repo}/actions/workflows/${target.workflow}/runs?${query}`,
+        );
+      }),
     );
     const headPromise = target.mode === "head"
       ? gh(env, `/repos/${user}/${target.repo}/commits/${target.branch}`)
       : Promise.resolve(null);
-    const [runs, head] = await Promise.all([runsPromise, headPromise]);
-    return classifyWorkflowRun(target, runs?.workflow_runs?.[0] ?? null, {
+    const [runResponses, head] = await Promise.all([runsPromise, headPromise]);
+    const latestRun = runResponses
+      .flatMap((response) => response?.workflow_runs ?? [])
+      .sort((left, right) => workflowRunTime(right) - workflowRunTime(left))[0] ?? null;
+    return classifyWorkflowRun(target, latestRun, {
       user,
       headSha: head?.sha ?? null,
       nowMs,
