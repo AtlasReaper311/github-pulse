@@ -73,7 +73,7 @@ npx wrangler dev                 # http://localhost:8787/pulse
 | `GET /pulse/heatmap` | Per-day commit counts for the last 90 days |
 | `GET /pulse/workflows` | Freshness-aware health for the three allowlisted non-runtime Atlas tools |
 
-`/pulse/workflows` is deliberately not a generic Actions proxy. It exposes only `atlas-badges`, `atlas-dep-audit`, and `atlas-journey-watch`, with no logs, actors, or arbitrary repository input. `atlas-badges` is healthy only when CI succeeded for the current `main` commit. The weekly dependency audit and six-hour journey watch are healthy only while their latest scheduled run is successful and fresh; running or overdue reads as `degraded`, a completed failure reads as `down`, and unavailable evidence reads as `unknown`.
+`/pulse/workflows` is deliberately not a generic Actions proxy. It exposes only `atlas-badges`, `atlas-dep-audit`, and `atlas-journey-watch`, with no logs, actors, or arbitrary repository input. `atlas-badges` is healthy only when CI succeeded for the current `main` commit. The weekly dependency audit and six-hour journey watch accept their latest scheduled run or an explicitly dispatched recovery run of the same workflow; the newest accepted run must be successful and fresh. Running or overdue reads as `degraded`, a completed failure reads as `down`, and unavailable evidence reads as `unknown`.
 
 Aggregate response shape:
 
