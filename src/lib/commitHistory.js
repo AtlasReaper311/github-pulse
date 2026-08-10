@@ -15,6 +15,8 @@
 
 const GRAPHQL_URL = "https://api.github.com/graphql";
 const BATCH_SIZE = 20;
+const HISTORY_PAGE_SIZE = 100;
+const MAX_HEATMAP_PAGES_PER_REPO = 10;
 const MAX_RETRIES = 3;
 const RETRY_BASE_MS = 400;
 
@@ -98,7 +100,7 @@ async function batchedHistoryQuery(token, owner, repoNames, since, historySelect
           defaultBranchRef {
             target {
               ... on Commit {
-                history(since: $since, first: 100) { ${historySelection} }
+                history(since: $since, first: ${HISTORY_PAGE_SIZE}) { ${historySelection} }
               }
             }
           }
@@ -115,6 +117,36 @@ async function batchedHistoryQuery(token, owner, repoNames, since, historySelect
     result[name] = data[toAlias(name)]?.defaultBranchRef?.target?.history ?? null;
   }
   return result;
+}
+
+/** Fetch one continuation page for a repository that exceeded the batched page. */
+async function repositoryHistoryPage(token, owner, name, since, after) {
+  const query = `
+    query RepoHistory($owner: String!, $name: String!, $since: GitTimestamp!, $after: String!) {
+      repository(owner: $owner, name: $name) {
+        defaultBranchRef {
+          target {
+            ... on Commit {
+              history(since: $since, first: ${HISTORY_PAGE_SIZE}, after: $after) {
+                nodes { committedDate }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  `;
+  const data = await graphqlRequest(token, query, { owner, name, since, after });
+  return data?.repository?.defaultBranchRef?.target?.history ?? null;
+}
+
+function addCommitDates(days, nodes) {
+  for (const node of nodes || []) {
+    const key = node.committedDate?.slice(0, 10);
+    if (!key) continue;
+    days[key] = (days[key] || 0) + 1;
+  }
 }
 
 /**
@@ -134,13 +166,16 @@ export async function getCommitCountSince(env, user, repoNames, since) {
 
 /**
  * Per-day commit counts since `since`, plus the same total the aggregate
- * endpoint reports so the two stay consistent. Replaces the paginated
- * /search/commits loop in heatmapStats.
+ * endpoint reports so the two stay consistent. The first 100 commits for
+ * every repository are fetched in the normal batched request. Only repos
+ * that actually exceed that page are continued individually, avoiding the
+ * previous false assumption that no repo would exceed 100 commits in a
+ * 90-day window.
  *
- * Each repo's history is capped at its first 100 commits in the window
- * (GraphQL connection default). For a solo estate that comfortably covers
- * 90 days per repo. truncatedRepos lists any repo that hit the cap so the
- * frontend can flag it, mirroring the old heatmap truncation notice.
+ * Continuation is deliberately bounded to ten 100-commit pages per repo.
+ * A repo that still has another page, or whose continuation cannot be read
+ * after retries, remains listed in truncatedRepos so callers never turn a
+ * partial distribution into measured zeroes.
  */
 export async function getCommitHeatmapSince(env, user, repoNames, since) {
   const days = {};
@@ -153,18 +188,38 @@ export async function getCommitHeatmapSince(env, user, repoNames, since) {
       user,
       batch,
       since,
-      "totalCount, nodes { committedDate } pageInfo { hasNextPage }",
+      "totalCount, nodes { committedDate } pageInfo { hasNextPage endCursor }",
     );
 
     for (const [name, history] of Object.entries(results)) {
       if (!history) continue;
       total += history.totalCount ?? 0;
-      if (history.pageInfo?.hasNextPage) truncatedRepos.push(name);
-      for (const node of history.nodes || []) {
-        const key = node.committedDate?.slice(0, 10);
-        if (!key) continue;
-        days[key] = (days[key] || 0) + 1;
+      addCommitDates(days, history.nodes);
+
+      let hasNextPage = history.pageInfo?.hasNextPage === true;
+      let cursor = history.pageInfo?.endCursor ?? null;
+      let pagesFetched = 1;
+      let continuationFailed = false;
+
+      while (hasNextPage && cursor && pagesFetched < MAX_HEATMAP_PAGES_PER_REPO) {
+        let page;
+        try {
+          page = await repositoryHistoryPage(env.GITHUB_TOKEN, user, name, since, cursor);
+        } catch {
+          continuationFailed = true;
+          break;
+        }
+        if (!page) {
+          continuationFailed = true;
+          break;
+        }
+        addCommitDates(days, page.nodes);
+        pagesFetched += 1;
+        hasNextPage = page.pageInfo?.hasNextPage === true;
+        cursor = page.pageInfo?.endCursor ?? null;
       }
+
+      if (hasNextPage || continuationFailed) truncatedRepos.push(name);
     }
   }
 
